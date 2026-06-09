@@ -2,7 +2,11 @@
 
 namespace Jiannius\Mailog;
 
+use Illuminate\Mail\Events\MessageSending;
+use Illuminate\Mail\Events\MessageSent;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\ServiceProvider;
+use Jiannius\Mailog\Listeners\MailLogListener;
 
 class MailogServiceProvider extends ServiceProvider
 {
@@ -18,6 +22,9 @@ class MailogServiceProvider extends ServiceProvider
         // Bind the package singleton and expose it as app('mailog').
         $this->app->singleton(Mailog::class, fn (): Mailog => new Mailog);
         $this->app->alias(Mailog::class, 'mailog');
+
+        // Singleton so one instance bridges MessageSending → MessageSent via its map.
+        $this->app->singleton(MailLogListener::class);
     }
 
     /**
@@ -28,33 +35,21 @@ class MailogServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
-        // Routes — uncomment once routes/web.php exists.
-        // $this->loadRoutesFrom(__DIR__.'/../routes/web.php');
+        // Migrations — host apps pick them up with `php artisan migrate`.
+        $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
 
-        // Migrations — uncomment once database/migrations/ exists; host apps
-        // pick them up with plain `php artisan migrate`.
-        // $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
-
-        // Views — uncomment once resources/views/ exists; view('mailog::...').
-        // $this->loadViewsFrom(__DIR__.'/../resources/views', 'mailog');
-
-        // Anonymous Blade components — uncomment once components/ exists and
-        // import Illuminate\Support\Facades\Blade; usable as <x-mailog::name />.
-        // Blade::anonymousComponentPath(__DIR__.'/../components', 'mailog');
-
-        // Translations — uncomment once a lang/ directory is added.
-        // $this->loadTranslationsFrom(__DIR__.'/../lang', 'mailog');
+        // Capture every outgoing email (logging is on by default).
+        Event::listen(MessageSending::class, [MailLogListener::class, 'sending']);
+        Event::listen(MessageSent::class, [MailLogListener::class, 'sent']);
 
         if ($this->app->runningInConsole()) {
-            // Let the host app publish + override the config file.
             $this->publishes([
                 __DIR__.'/../config/mailog.php' => config_path('mailog.php'),
             ], 'mailog-config');
 
-            // Artisan commands — uncomment and list the command classes once added.
-            // $this->commands([
-            //     Commands\ExampleCommand::class,
-            // ]);
+            $this->publishes([
+                __DIR__.'/../database/migrations' => database_path('migrations'),
+            ], 'mailog-migrations');
         }
     }
 }

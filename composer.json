@@ -23,7 +23,8 @@
     },
     "autoload": {
         "psr-4": {
-            "Jiannius\\Mailog\\": "src/"
+            "Jiannius\\Mailog\\": "src/",
+            "Jiannius\\Mailog\\Database\\Factories\\": "database/factories/"
         },
         "files": [
             "src/Helpers.php"

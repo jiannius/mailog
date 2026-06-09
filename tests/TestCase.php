@@ -29,5 +29,8 @@ abstract class TestCase extends Orchestra
             'prefix' => '',
         ]);
         $app['config']->set('app.key', 'base64:'.base64_encode(random_bytes(32)));
+        $app['config']->set('mail.default', 'array');
+        $app['config']->set('mail.mailers.array', ['transport' => 'array']);
+        $app['config']->set('mail.from', ['address' => 'noreply@example.com', 'name' => 'Test']);
     }
 }
