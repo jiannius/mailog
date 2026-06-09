@@ -4,21 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`jiannius/mailog` is a **Laravel package mailog** — a clone-and-rename starting point for jiannius Laravel packages (composer `type: library`, PSR-4 `Jiannius\Mailog\`). It is consumed by host Laravel apps via `composer require`; this repo is the library itself, not a host app.
+`jiannius/mailog` is a **Laravel package** (composer `type: library`, PSR-4 `Jiannius\Mailog\`) that **audit-logs every outgoing email a host app sends** into a `mail_logs` table — automatically, via Laravel's mail events. It is consumed by host Laravel apps via `composer require`; this repo is the library itself, not a host app. See Architecture below for how capture works; see `README.md` / `resources/boost/guidelines/core.blade.php` for host-facing usage.
 
 Because a package has no `artisan` binary, all dev/test/AI tooling runs through **Orchestra Testbench**: `vendor/bin/testbench` is the artisan equivalent, booting a throwaway Laravel 13 app (configured by `testbench.yaml`) with `MailogServiceProvider` registered.
 
 Main stack — abide by these versions: php 8.4 (constraint `^8.3`) · laravel/framework v13 (via Testbench) · orchestra/testbench v11 · pestphp/pest v4 · phpunit v12 · laravel/pint v1 · laravel/boost v2.
-
-To turn this mailog into a real package, run `php configure.php` (see README) — it rewrites the `Mailog`/`mailog` placeholder identity and self-deletes.
 
 ## Common commands
 
 ```bash
 composer install                                   # install dependencies
 composer test                                      # Pest 4 + Testbench suite
-vendor/bin/pest tests/Feature/SmokeTest.php        # single test file
-vendor/bin/pest --filter='binds the mailog singleton'  # single test
+vendor/bin/pest tests/Feature/MailLogTest.php      # single test file
+vendor/bin/pest --filter='logs a sent email'       # single test
 composer lint                                      # vendor/bin/pint
 vendor/bin/testbench boost:mcp                     # start the Boost MCP server (used by editors)
 vendor/bin/testbench boost:install                 # merge Boost core + .ai guidelines (review output)
@@ -45,13 +43,23 @@ Laravel Boost is installed (dev) and runs through Testbench. Editors connect via
 
 ## Architecture
 
+### Mail capture (`src/Listeners/MailLogListener.php`)
+
+The package's reason for being. A singleton listener subscribes to Laravel's `MessageSending` and `MessageSent` events. On *sending* it builds a `PENDING` `MailLog` from the Symfony `Email` (sender, recipients, subject, both bodies, attachment metadata, tags, metadata, mailer, mailable) plus the resolved user/data, and records `message-object => log id` in a **`WeakMap`** (object-keyed so it can't leak or mis-correlate via `spl_object_id` reuse in long-running workers). On *sent* it flips the row to `SENT` with the transport message id. A row left `PENDING` = the send failed. Both handlers are wrapped in `try/catch` + `report()` — **logging must never break the host's email send**.
+
+Opt-outs, all checked early in `sending()`: `config('mailog.enabled')` master switch, `except.mailers` / `except.mailables`, and the per-message `Mailog::SKIP_HEADER` (which is stripped before the message is sent).
+
+### Model + enum (`src/Models/MailLog.php`, `src/Enums/Status.php`)
+
+`MailLog` is an **unguarded** ULID model (table from `config('mailog.table')`) with `pending()` / `sent()` scopes and json casts. It is unguarded so host apps can add real columns (e.g. `tenant_id`) via the published migration and have the data resolver fill them — there is no catch-all `data` column. `Status` (`PENDING` / `SENT` / `FAILED`) mixes in the `Enum` trait; `FAILED` is never set by capture (reserved for hosts to set from bounce webhooks).
+
+### Singleton entry-point + resolvers (`src/Mailog.php` → `app('mailog')` / `mailog()`)
+
+The public API object, resolvable via the `mailog` alias or the autoloaded `mailog()` helper (`src/Helpers.php`). Holds the host-set resolvers — `Mailog::resolveUserUsing()` (default `auth()->user()`; records `user_id` + a `user_name` snapshot, no FK so logs outlive the user) and `Mailog::resolveDataUsing()` (host custom columns) — plus the `SKIP_HEADER` constant. Add cross-cutting package methods here.
+
 ### Service-provider wiring (`src/MailogServiceProvider.php`)
 
-`register()` merges `config/mailog.php` and binds the `Mailog` singleton (aliased `app('mailog')`). `boot()` is minimal by default: it only publishes the config (tag `mailog-config`, console-only). Hooks for routes, migrations, views, components, translations, and commands sit there commented out — uncomment one and create the matching file/directory when the package needs it (the README "How-to recipes" carry the file templates). Read this file first when something seems to come from nowhere.
-
-### Singleton entry-point (`src/Mailog.php` → `app('mailog')` / `mailog()`)
-
-The package's public API object, resolvable via the container alias `mailog` or the autoloaded `mailog()` helper (`src/Helpers.php`). Add cross-cutting package methods here.
+`register()` merges `config/mailog.php` and binds the `Mailog` + `MailLogListener` singletons (Mailog aliased `app('mailog')`). `boot()` loads the migration (`loadMigrationsFrom`), registers the two mail-event listeners, and (console-only) publishes the config (tag `mailog-config`) + migrations (tag `mailog-migrations`). Read this file first when something seems to come from nowhere.
 
 ## Development guidelines
 
@@ -76,8 +84,8 @@ Curated from the jiannius app mailog (`mailog-project`) — the subset that appl
 
 ### Models & data
 
-- Main tables use ULID primary keys (`HasUlids` + `$table->ulid('id')->primary()`) plus a nullable `data` json column for metadata. Plain auto-increment ids are fine for pivot tables.
-- When adding a model, add its factory (and a seeder if useful) and wire `newFactory()` — package factory namespaces aren't auto-discovered by Laravel's convention.
+- Main tables use ULID primary keys (`HasUlids` + `$table->ulid('id')->primary()`). `MailLog` is deliberately **unguarded with no catch-all `data` column** — host apps extend it with real, indexable columns via the published migration + `Mailog::resolveDataUsing()`. Plain auto-increment ids are fine for pivot tables.
+- When adding a model, add its factory (and a seeder if useful) and wire `newFactory()` — package factory namespaces aren't auto-discovered by Laravel's convention (map `Jiannius\Mailog\Database\Factories\` in `composer.json`).
 - Use named routes and `route()` when generating links.
 
 ### Testing (Pest 4 + Testbench)

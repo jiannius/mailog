@@ -1,6 +1,6 @@
 ## Package development (jiannius/mailog)
 
-This is a Laravel **package** (composer `type: library`, PSR-4 `Jiannius\Mailog\`), not an app. There is no `artisan` binary — dev/test/Boost tooling runs through Orchestra Testbench's `vendor/bin/testbench` against a throwaway Laravel app configured by `testbench.yaml`.
+This is a Laravel **package** (composer `type: library`, PSR-4 `Jiannius\Mailog\`), not an app. It audit-logs every outgoing email a host app sends into a `mail_logs` table, automatically via Laravel's mail events (`MessageSending`/`MessageSent`); the core is `src/Listeners/MailLogListener.php` writing a `MailLog` model. There is no `artisan` binary — dev/test/Boost tooling runs through Orchestra Testbench's `vendor/bin/testbench` against a throwaway Laravel app configured by `testbench.yaml`.
 
 ### Testbench is the artisan
 
@@ -26,7 +26,7 @@ This is a Laravel **package** (composer `type: library`, PSR-4 `Jiannius\Mailog\
 
 ### Models & data
 
-- Main tables use ULID primary keys (`HasUlids` + `$table->ulid('id')->primary()`) plus a nullable `data` json column for metadata. Plain auto-increment ids are fine for pivot tables.
+- Main tables use ULID primary keys (`HasUlids` + `$table->ulid('id')->primary()`). `MailLog` is deliberately unguarded with no catch-all `data` column — hosts add real columns via the published migration + `Mailog::resolveDataUsing()`. Plain auto-increment ids are fine for pivot tables.
 - When adding a model, add its factory (and a seeder if useful) and wire `newFactory()` — package factory namespaces aren't auto-discovered.
 - Use named routes and `route()` when generating links.
 - The package's public API hangs off the `Mailog` singleton (`app('mailog')` / the `mailog()` helper).
