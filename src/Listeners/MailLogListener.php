@@ -122,6 +122,35 @@ class MailLogListener
     }
 
     /**
+     * Flip the pending log to failed when the transport throws on send.
+     *
+     * Called by MailLogTransport, not by an event (Laravel has none for a
+     * failed send). A no-op when the message has no pending log — e.g. it was
+     * skipped/excluded, or logging is disabled.
+     */
+    public function failed(object $message, \Throwable $e): void
+    {
+        try {
+            if (! isset($this->pending[$message])) {
+                return;
+            }
+
+            $id = $this->pending[$message];
+
+            unset($this->pending[$message]);
+
+            MailLog::query()->whereKey($id)->update([
+                'status' => Status::FAILED->value,
+                'error' => $e::class.': '.$e->getMessage(),
+                'failed_at' => now(),
+            ]);
+        } catch (\Throwable $e) {
+            // Logging must never break the host's email send — report and move on.
+            report($e);
+        }
+    }
+
+    /**
      * Normalize an array of Symfony addresses to [{address, name}].
      *
      * @param  array<int, Address>  $addresses

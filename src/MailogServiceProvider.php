@@ -5,8 +5,10 @@ namespace Jiannius\Mailog;
 use Illuminate\Mail\Events\MessageSending;
 use Illuminate\Mail\Events\MessageSent;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\ServiceProvider;
 use Jiannius\Mailog\Listeners\MailLogListener;
+use Jiannius\Mailog\Transport\MailLogTransport;
 
 class MailogServiceProvider extends ServiceProvider
 {
@@ -42,6 +44,9 @@ class MailogServiceProvider extends ServiceProvider
         Event::listen(MessageSending::class, [MailLogListener::class, 'sending']);
         Event::listen(MessageSent::class, [MailLogListener::class, 'sent']);
 
+        // Capture send-time transport failures (Laravel fires no event for them).
+        $this->captureSendFailures();
+
         if ($this->app->runningInConsole()) {
             $this->publishes([
                 __DIR__.'/../config/mailog.php' => config_path('mailog.php'),
@@ -50,6 +55,33 @@ class MailogServiceProvider extends ServiceProvider
             $this->publishes([
                 __DIR__.'/../database/migrations' => database_path('migrations'),
             ], 'mailog-migrations');
+        }
+    }
+
+    /**
+     * Wrap each configured mailer's transport so a synchronous send failure
+     * flips its pending log to FAILED. Each mailer is wrapped in isolation so a
+     * single misconfigured mailer can never break the host's boot. On-demand
+     * mailers (Mail::mailer([...])) are not covered.
+     */
+    protected function captureSendFailures(): void
+    {
+        if (! config('mailog.enabled', true)) {
+            return;
+        }
+
+        $listener = $this->app->make(MailLogListener::class);
+
+        foreach (array_keys(config('mail.mailers', [])) as $name) {
+            try {
+                $mailer = Mail::mailer($name);
+
+                $mailer->setSymfonyTransport(
+                    new MailLogTransport($mailer->getSymfonyTransport(), $listener)
+                );
+            } catch (\Throwable $e) {
+                report($e);
+            }
         }
     }
 }

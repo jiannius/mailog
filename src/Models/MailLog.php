@@ -38,6 +38,7 @@ class MailLog extends Model
             'tags' => 'array',
             'metadata' => 'array',
             'sent_at' => 'datetime',
+            'failed_at' => 'datetime',
         ];
     }
 
@@ -50,7 +51,7 @@ class MailLog extends Model
     }
 
     /**
-     * Scope to logs still pending (in-flight or failed).
+     * Scope to logs still pending (the send is in-flight, or never completed).
      */
     public function scopePending(Builder $query): Builder
     {
@@ -63,6 +64,14 @@ class MailLog extends Model
     public function scopeSent(Builder $query): Builder
     {
         return $query->where('status', Status::SENT->value);
+    }
+
+    /**
+     * Scope to logs whose send failed.
+     */
+    public function scopeFailed(Builder $query): Builder
+    {
+        return $query->where('status', Status::FAILED->value);
     }
 
     /**

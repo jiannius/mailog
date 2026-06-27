@@ -27,7 +27,9 @@ return new class extends Migration
             $table->json('tags')->nullable();
             $table->json('metadata')->nullable();
             $table->string('message_id')->nullable();
+            $table->longText('error')->nullable();
             $table->timestamp('sent_at')->nullable();
+            $table->timestamp('failed_at')->nullable();
             $table->timestamps();
 
             $table->index('created_at');
