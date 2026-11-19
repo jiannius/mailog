@@ -4,6 +4,7 @@ namespace Jiannius\Mailog\Tests;
 
 use Jiannius\Mailog\MailogServiceProvider;
 use Jiannius\Mailog\Tests\Support\HostCancelServiceProvider;
+use Jiannius\Mailog\Tests\Support\HostEarlyServiceProvider;
 use Orchestra\Testbench\TestCase as Orchestra;
 
 abstract class TestCase extends Orchestra
@@ -15,7 +16,7 @@ abstract class TestCase extends Orchestra
      */
     protected function getPackageProviders($app): array
     {
-        return [MailogServiceProvider::class, HostCancelServiceProvider::class];
+        return [HostEarlyServiceProvider::class, MailogServiceProvider::class, HostCancelServiceProvider::class];
     }
 
     /**

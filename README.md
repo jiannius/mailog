@@ -47,21 +47,29 @@ Each send creates one `Jiannius\Mailog\Models\MailLog` row:
 | `message_id` | the transport message id, set once sent |
 | `sent_at` | timestamp the transport accepted the message |
 
-A row is created `pending` when the message is about to send and flipped to `sent` once the
-transport accepts it. If the transport throws, the row becomes `failed` (the exception goes in
-`error`, with `failed_at`); if the transport rejects the message before sending, it becomes
-`cancelled`. A row left `pending` means the send never completed (e.g. the worker died mid-send).
+A row is created `pending` just before the transport sends the message and flipped to `sent`
+once the transport accepts it. A message a `MessageSending` listener cancels (returns `false`)
+never reaches the transport, so it gets no row. If the transport throws, the row becomes `failed`
+(the exception goes in `error`, with `failed_at`); if the transport rejects the message before
+sending, it becomes `cancelled`. A row left `pending` means the send never completed (e.g. the
+worker died mid-send).
 
-Two caveats leave a row `pending` although the mail never went out:
+Mailog wraps each configured mailer's transport to do this, so `Mail::getSymfonyTransport()` is the
+raw transport only until the first logged send (or app boot), and a Mailog decorator afterwards;
+unknown methods are forwarded to the real transport.
 
-- **Cancelling listeners.** Laravel lets a `MessageSending` listener return `false` to cancel a
-  send. Mailog registers its own listener once the app has booted, so a cancelling listener
-  registered during boot (a service provider, `EventServiceProvider`, discovered listeners) runs
-  first and the cancelled mail gets no row. A listener you register at runtime, after boot, runs
-  after Mailog's and leaves its row `pending`.
-- **On-demand mailers.** Outcome capture applies to mailers defined in `config('mail.mailers')`.
-  On-demand mailers (`Mail::mailer([...])`, `Mail::build()`) can't be wrapped, so a throw, a
-  rejection or a transport that clones the message leaves their row `pending`.
+Known caveats:
+
+- **On-demand mailers** (`Mail::mailer([...])`, `Mail::build()`) can't be wrapped, so Mailog inserts
+  their row on `MessageSending`. A cancel, a throw, a rejection, or a transport that clones the
+  message (most real transports) leaves their row `pending`.
+- **Mailers that aren't Laravel's cached instance** (a `Mail::build()` with a configured mailer
+  name, a mailer instance held across `Mail::purge()`) are logged when the message is sent, but
+  only if their transport doesn't clone the message; with a cloning transport they get no row.
+- **Earlier listeners.** If a listener registered before Mailog's returns a non-null value from
+  `MessageSending`, Laravel skips Mailog's listener. The row is still created (from the message
+  alone, so `mailable` is empty), and `except.mailers` / `enabled` / the skip header still apply,
+  but `except.mailables` can't. On-demand mailers get no row in that case.
 
 ## Querying logs
 
@@ -163,11 +171,13 @@ The returned array is filled onto the log, so the value lands in your real, inde
 
 ## How it works
 
-Mailog subscribes to Laravel's `MessageSending` and `MessageSent` events. The first creates the
-`pending` row and extracts every field from the Symfony `Email`, and wraps the mailer's transport in
-a decorator the first time it logs a send. The decorator flips the row to `sent` with the
-transport's message id (the `MessageSent` handler is the fallback for on-demand mailers, which
-can't be wrapped), or to `failed` / `cancelled` when the send throws or is rejected. The message is
+Mailog subscribes to Laravel's `MessageSending` and `MessageSent` events. On sending it applies the
+opt-outs, extracts every field from the Symfony `Email`, and keeps them aside; it also wraps the
+mailer's transport in a decorator (at boot, and again lazily if needed). The decorator inserts the
+`pending` row just before the real send, so a cancelled mail leaves nothing behind, then flips it to
+`sent` with the transport's message id, or to `failed` / `cancelled` when the send throws or is
+rejected. The `MessageSent` handler is the fallback for mailers the decorator can't cover. The
+message is
 correlated by the message object itself (via a `WeakMap`), so logging is reliable even in
 long-running workers (Octane, `queue:work`).
 
