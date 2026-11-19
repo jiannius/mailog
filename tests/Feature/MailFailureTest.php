@@ -1,6 +1,7 @@
 <?php
 
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Mail\Events\MessageSending;
 use Illuminate\Mail\Events\MessageSent;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
@@ -18,7 +19,9 @@ use Symfony\Component\Mime\RawMessage;
 
 uses(RefreshDatabase::class);
 
-it('wraps the configured mailer transport at boot', function () {
+it('wraps the configured mailer transport on its first send', function () {
+    Mail::html('<p>hi</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('First'));
+
     expect(Mail::getSymfonyTransport())->toBeInstanceOf(MailLogTransport::class);
 });
 
@@ -109,6 +112,67 @@ it('marks the log cancelled when the transport rejects the message', function ()
     expect($log->failed_at)->toBeNull();
     expect($log->error)->toBeNull();
     expect($log->message_id)->toBeNull();
+});
+
+it('creates no row when a MessageSending listener cancels the send', function () {
+    // Registered after the package's own listener, exactly like a host app's listener.
+    Event::listen(MessageSending::class, fn () => false);
+
+    Mail::html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('Blocked'));
+
+    expect(MailLog::count())->toBe(0);
+    expect(Mail::getSymfonyTransport()->messages())->toHaveCount(0);
+});
+
+it('still logs and reaches sent after the mailers are purged', function () {
+    Mail::purge();
+
+    Mail::html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('Purged'));
+
+    expect(Mail::getSymfonyTransport())->toBeInstanceOf(MailLogTransport::class);
+    expect(MailLog::sole()->status)->toBe(Status::SENT);
+});
+
+it('reaches sent through a cloning transport on a mailer that was never wrapped', function () {
+    Mail::extend('cloning', fn () => new NullTransport);
+    config()->set('mail.mailers.cloning', ['transport' => 'cloning']);
+
+    Mail::mailer('cloning')->html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('Lazy'));
+
+    $log = MailLog::sole();
+    expect($log->mailer)->toBe('cloning');
+    expect($log->status)->toBe(Status::SENT);
+    expect($log->message_id)->not->toBeNull();
+});
+
+it('falls back to inserting on sending for on-demand mailers', function () {
+    $mailer = Mail::build(['transport' => 'array']);
+
+    $mailer->html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('On demand'));
+
+    // Not wrapped, so the row is inserted on MessageSending and flipped by the MessageSent fallback.
+    expect($mailer->getSymfonyTransport())->not->toBeInstanceOf(MailLogTransport::class);
+    $log = MailLog::sole();
+    expect($log->mailer)->toBe('ondemand');
+    expect($log->status)->toBe(Status::SENT);
+});
+
+it('leaves an on-demand mailer row pending when its transport clones the message', function () {
+    Mail::extend('cloning', fn () => new NullTransport);
+
+    Mail::build(['transport' => 'cloning'])
+        ->html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('On demand clone'));
+
+    expect(MailLog::sole()->status)->toBe(Status::PENDING);
+});
+
+it('creates no row for an opted-out message even on a wrapped mailer', function () {
+    config()->set('mailog.except.mailers', ['array']);
+
+    Mail::html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('Excluded'));
+
+    expect(MailLog::count())->toBe(0);
+    expect(Mail::getSymfonyTransport()->messages())->toHaveCount(1);
 });
 
 class ThrowingTransport implements TransportInterface

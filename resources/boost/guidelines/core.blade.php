@@ -8,8 +8,8 @@ tracking. Its service provider auto-registers and listens to Laravel's mail even
 
 Each send creates a `Jiannius\Mailog\Models\MailLog` row: sender, recipients (to/cc/bcc/reply-to),
 subject, both HTML and text bodies, attachment metadata (filename/mime/size), tags, metadata,
-the mailer + Mailable class, the resolved user, and the outcome. A row is created `PENDING` on
-send and flipped to `SENT` once the transport accepts it. If the transport throws at send time,
+the mailer + Mailable class, the resolved user, and the outcome. A row is created `PENDING` just
+before the transport sends (a mail cancelled by a `MessageSending` listener gets no row) and flipped to `SENT` once the transport accepts it. If the transport throws at send time,
 the row is flipped to `FAILED` with the error stored in the `error` column (and `failed_at`); the
 original exception is rethrown, so your send fails exactly as it would without the package. If the
 transport rejects the message before sending (returns nothing), the row is flipped to `CANCELLED`. A row
