@@ -9,6 +9,7 @@ use Jiannius\Mailog\Transport\MailLogTransport;
 use Symfony\Component\Mailer\Envelope;
 use Symfony\Component\Mailer\Exception\TransportException;
 use Symfony\Component\Mailer\SentMessage;
+use Symfony\Component\Mailer\Transport\NullTransport;
 use Symfony\Component\Mailer\Transport\TransportInterface;
 use Symfony\Component\Mime\RawMessage;
 
@@ -47,6 +48,21 @@ it('marks the log failed and records the error when the transport throws', funct
     expect($log->failed_at)->not->toBeNull();
     expect($log->sent_at)->toBeNull();
     expect($log->message_id)->toBeNull();
+});
+
+it('marks the log sent when the real transport clones the message', function () {
+    // Real Symfony transports (SMTP, Mailgun, SES) clone the message in AbstractTransport::send(),
+    // so MessageSent carries a different object than MessageSending saw. NullTransport clones too.
+    $mailer = Mail::mailer('array');
+    $mailer->setSymfonyTransport(new MailLogTransport(new NullTransport, app(MailLogListener::class)));
+
+    $mailer->html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('Cloned'));
+
+    $log = MailLog::sole();
+    expect($log->status)->toBe(Status::SENT);
+    expect($log->sent_at)->not->toBeNull();
+    expect($log->message_id)->not->toBeNull();
+    expect($log->failed_at)->toBeNull();
 });
 
 class ThrowingTransport implements TransportInterface
