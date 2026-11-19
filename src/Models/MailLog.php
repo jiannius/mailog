@@ -75,6 +75,14 @@ class MailLog extends Model
     }
 
     /**
+     * Scope to logs the transport rejected before sending.
+     */
+    public function scopeCancelled(Builder $query): Builder
+    {
+        return $query->where('status', Status::CANCELLED->value);
+    }
+
+    /**
      * The package factory for this model.
      */
     protected static function newFactory(): MailLogFactory

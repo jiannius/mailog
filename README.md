@@ -35,7 +35,7 @@ Each send creates one `Jiannius\Mailog\Models\MailLog` row:
 
 | Column | Contents |
 | --- | --- |
-| `status` | `pending` → `sent` (a row left `pending` means the send failed) |
+| `status` | `pending` → `sent`, `failed` or `cancelled` (a row left `pending` means the send never completed) |
 | `mailer` | the mailer name (e.g. `smtp`, `ses`) |
 | `mailable` | the Mailable class, when sent via one |
 | `user_id` / `user_name` | the resolved acting user + a name snapshot (see below) |
@@ -48,8 +48,13 @@ Each send creates one `Jiannius\Mailog\Models\MailLog` row:
 | `sent_at` | timestamp the transport accepted the message |
 
 A row is created `pending` when the message is about to send and flipped to `sent` once the
-transport accepts it. If the transport throws, the `sent` step never runs and the row stays
-`pending` — giving you failure visibility for free.
+transport accepts it. If the transport throws, the row becomes `failed` (the exception goes in
+`error`, with `failed_at`); if the transport rejects the message before sending, it becomes
+`cancelled`. A row left `pending` means the send never completed (e.g. the worker died mid-send).
+
+Failure and cancellation capture applies only to mailers defined in `config('mail.mailers')`.
+On-demand mailers (`Mail::mailer([...])`) aren't wrapped, so a throw or rejection leaves their row
+`pending`.
 
 ## Querying logs
 
@@ -57,12 +62,16 @@ transport accepts it. If the transport throws, the `sent` step never runs and th
 use Jiannius\Mailog\Models\MailLog;
 
 MailLog::sent()->latest()->get();          // confirmed sent
-MailLog::pending()->get();                 // in-flight or failed
+MailLog::failed()->get();                  // transport threw; see ->error
+MailLog::cancelled()->get();               // transport rejected the message
+MailLog::pending()->get();                 // in-flight or never completed
 MailLog::where('to', 'like', '%@acme.com%')->get();
 ```
 
-`status` is cast to `Jiannius\Mailog\Enums\Status` (`PENDING`, `SENT`, `FAILED`). `FAILED` is
-never set automatically — it's reserved for you to set from a bounce/complaint webhook.
+`status` is cast to `Jiannius\Mailog\Enums\Status` (`PENDING`, `SENT`, `FAILED`,
+`CANCELLED`). `FAILED` is set automatically when the transport throws at send time, and you may
+also set it from a bounce/complaint webhook. `CANCELLED` means the transport rejected the message
+before sending.
 
 ## Configuration
 
@@ -148,9 +157,11 @@ The returned array is filled onto the log, so the value lands in your real, inde
 ## How it works
 
 Mailog subscribes to Laravel's `MessageSending` and `MessageSent` events. The first creates the
-`pending` row and extracts every field from the Symfony `Email`; the second flips it to `sent`
-with the transport's message id. The two events are correlated by the message object itself (via
-a `WeakMap`), so logging is reliable even in long-running workers (Octane, `queue:work`).
+`pending` row and extracts every field from the Symfony `Email`; the transport decorator flips it
+to `sent` with the transport's message id (the `MessageSent` handler is a fallback for unwrapped
+mailers), or to `failed` / `cancelled` when the send throws or is rejected. The message is
+correlated by the message object itself (via a `WeakMap`), so logging is reliable even in
+long-running workers (Octane, `queue:work`).
 
 Capture is wrapped so that **a logging failure can never break your application's email** — any
 exception while logging is reported and swallowed; the email still sends.

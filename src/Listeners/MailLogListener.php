@@ -126,7 +126,9 @@ class MailLogListener
     }
 
     /**
-     * Flip the pending log to sent after the transport accepts the message.
+     * Flip the pending log after the transport returns: sent when it accepted
+     * the message, cancelled when it returned null (a MessageEvent listener
+     * rejected the message, so nothing was sent and Laravel fires no MessageSent).
      *
      * Called by MailLogTransport with the same message object MessageSending
      * saw, since real transports clone it before MessageSent fires. A no-op
@@ -143,11 +145,15 @@ class MailLogListener
 
             unset($this->pending[$message]);
 
-            MailLog::query()->whereKey($id)->update([
-                'status' => Status::SENT->value,
-                'message_id' => $sent?->getMessageId(),
-                'sent_at' => now(),
-            ]);
+            $attributes = $sent === null
+                ? ['status' => Status::CANCELLED->value]
+                : [
+                    'status' => Status::SENT->value,
+                    'message_id' => $sent->getMessageId(),
+                    'sent_at' => now(),
+                ];
+
+            MailLog::query()->whereKey($id)->update($attributes);
         } catch (\Throwable $e) {
             // Logging must never break the host's email send — report and move on.
             report($e);

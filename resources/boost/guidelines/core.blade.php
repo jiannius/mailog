@@ -11,7 +11,8 @@ subject, both HTML and text bodies, attachment metadata (filename/mime/size), ta
 the mailer + Mailable class, the resolved user, and the outcome. A row is created `PENDING` on
 send and flipped to `SENT` once the transport accepts it. If the transport throws at send time,
 the row is flipped to `FAILED` with the error stored in the `error` column (and `failed_at`); the
-original exception is rethrown, so your send fails exactly as it would without the package. A row
+original exception is rethrown, so your send fails exactly as it would without the package. If the
+transport rejects the message before sending (returns nothing), the row is flipped to `CANCELLED`. A row
 left `PENDING` means the send never completed (e.g. the process died mid-send).
 
 @verbatim
@@ -20,6 +21,7 @@ use Jiannius\Mailog\Models\MailLog;
 
 MailLog::sent()->latest()->get();
 MailLog::failed()->get();           // transport threw at send time; see ->error
+MailLog::cancelled()->get();        // transport rejected the message before sending
 MailLog::pending()->get();          // in-flight / never completed
 mailog()->version();                // package entry-point singleton
 </code-snippet>

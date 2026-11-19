@@ -22,3 +22,11 @@ it('exposes the sent factory state and scope', function () {
     expect($log->status)->toBe(Status::SENT);
     expect($log->sent_at)->not->toBeNull();
 });
+
+it('exposes the cancelled scope', function () {
+    MailLog::factory()->create(['status' => Status::CANCELLED]);
+    MailLog::factory()->sent()->create();
+
+    $log = MailLog::cancelled()->sole();
+    expect($log->status)->toBe(Status::CANCELLED);
+});

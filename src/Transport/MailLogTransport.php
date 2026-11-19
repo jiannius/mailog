@@ -9,11 +9,12 @@ use Symfony\Component\Mailer\Transport\TransportInterface;
 use Symfony\Component\Mime\RawMessage;
 
 /**
- * Wraps the host's real Symfony transport so a send-time failure can be
- * recorded. Laravel fires no "message failed" event — the transport simply
- * throws — so the only place to observe a synchronous send error is around the
- * transport's send() call. On failure we flip the pending log to FAILED, then
- * rethrow so the host's send fails exactly as it would without the package.
+ * Wraps the host's real Symfony transport so the send outcome can be recorded.
+ * Laravel fires no "message failed" event — the transport simply throws — and
+ * no event at all when a message is rejected, so the only place to observe
+ * these is around the transport's send() call. On success we flip the pending
+ * log to SENT, on a null return to CANCELLED, and on a throw to FAILED (then
+ * rethrow so the host's send fails exactly as it would without the package).
  */
 class MailLogTransport implements TransportInterface
 {
@@ -27,9 +28,10 @@ class MailLogTransport implements TransportInterface
 
     /**
      * Send via the inner transport, logging the outcome: sent on success,
-     * failed (then rethrown) if it throws. Marking sent here rather than from
-     * MessageSent is deliberate — real Symfony transports clone the message, so
-     * the event's original message is not the object the pending log is keyed by.
+     * cancelled if it returns null (message rejected), failed (then rethrown)
+     * if it throws. Marking sent here rather than from MessageSent is
+     * deliberate — real Symfony transports clone the message, so the event's
+     * original message is not the object the pending log is keyed by.
      */
     public function send(RawMessage $message, ?Envelope $envelope = null): ?SentMessage
     {
