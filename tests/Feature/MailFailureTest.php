@@ -2,6 +2,7 @@
 
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Mail\Events\MessageSent;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Mail;
 use Jiannius\Mailog\Enums\Status;
@@ -63,30 +64,36 @@ it('marks the log sent when the real transport clones the message', function () 
         $sentMessages[] = $event->sent;
     });
 
-    $this->travelTo(now()->startOfSecond());
-
     $mailer->html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('Cloned'));
 
     $log = MailLog::sole();
-    $sentAt = $log->sent_at;
-    $messageId = $log->message_id;
 
     expect($log->status)->toBe(Status::SENT);
-    expect($sentAt)->not->toBeNull();
-    expect($messageId)->not->toBeNull();
+    expect($log->sent_at)->not->toBeNull();
     expect($log->failed_at)->toBeNull();
 
     // MessageSent fired with the transport's SentMessage; the id the log holds is that one.
     expect($sentMessages)->toHaveCount(1);
-    expect($messageId)->toBe($sentMessages[0]->getMessageId());
+    expect($log->message_id)->not->toBeNull()->toBe($sentMessages[0]->getMessageId());
+});
 
-    // The sent() fallback must not write again afterwards: a second write would restamp sent_at.
-    $this->travel(5)->seconds();
-    app(MailLogListener::class)->sent(new MessageSent($sentMessages[0]));
+it('writes the sent status once when the transport does not clone the message', function () {
+    // With a non-cloning transport MessageSent carries the very object the pending log is keyed by,
+    // so the sent() fallback would write a second time unless delivered() cleared the entry first.
+    $mailer = Mail::mailer('array');
+    $mailer->setSymfonyTransport(new MailLogTransport(new KeepTransport, app(MailLogListener::class)));
 
-    $log->refresh();
-    expect($log->sent_at->equalTo($sentAt))->toBeTrue();
-    expect($log->message_id)->toBe($messageId);
+    $updates = 0;
+    DB::listen(function ($query) use (&$updates) {
+        if (str_starts_with(strtolower($query->sql), 'update')) {
+            $updates++;
+        }
+    });
+
+    $mailer->html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('Kept'));
+
+    expect(MailLog::sole()->status)->toBe(Status::SENT);
+    expect($updates)->toBe(1);
 });
 
 it('marks the log cancelled when the transport rejects the message', function () {
@@ -127,5 +134,18 @@ class RejectingTransport implements TransportInterface
     public function __toString(): string
     {
         return 'rejecting';
+    }
+}
+
+class KeepTransport implements TransportInterface
+{
+    public function send(RawMessage $message, ?Envelope $envelope = null): ?SentMessage
+    {
+        return new SentMessage($message, $envelope ?? Envelope::create($message));
+    }
+
+    public function __toString(): string
+    {
+        return 'keep';
     }
 }

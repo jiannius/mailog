@@ -52,6 +52,10 @@ transport accepts it. If the transport throws, the row becomes `failed` (the exc
 `error`, with `failed_at`); if the transport rejects the message before sending, it becomes
 `cancelled`. A row left `pending` means the send never completed (e.g. the worker died mid-send).
 
+Failure and cancellation capture applies only to mailers defined in `config('mail.mailers')`.
+On-demand mailers (`Mail::mailer([...])`) aren't wrapped, so a throw or rejection leaves their row
+`pending`.
+
 ## Querying logs
 
 ```php
@@ -59,6 +63,7 @@ use Jiannius\Mailog\Models\MailLog;
 
 MailLog::sent()->latest()->get();          // confirmed sent
 MailLog::failed()->get();                  // transport threw; see ->error
+MailLog::cancelled()->get();               // transport rejected the message
 MailLog::pending()->get();                 // in-flight or never completed
 MailLog::where('to', 'like', '%@acme.com%')->get();
 ```
@@ -152,10 +157,11 @@ The returned array is filled onto the log, so the value lands in your real, inde
 ## How it works
 
 Mailog subscribes to Laravel's `MessageSending` and `MessageSent` events. The first creates the
-`pending` row and extracts every field from the Symfony `Email`; the transport decorator
-flips it to `sent` with the transport's message id (the `MessageSent` handler is a fallback for
-unwrapped mailers), or to `failed` / `cancelled` when the send throws or is rejected. The two events are correlated by the message object itself (via
-a `WeakMap`), so logging is reliable even in long-running workers (Octane, `queue:work`).
+`pending` row and extracts every field from the Symfony `Email`; the transport decorator flips it
+to `sent` with the transport's message id (the `MessageSent` handler is a fallback for unwrapped
+mailers), or to `failed` / `cancelled` when the send throws or is rejected. The message is
+correlated by the message object itself (via a `WeakMap`), so logging is reliable even in
+long-running workers (Octane, `queue:work`).
 
 Capture is wrapped so that **a logging failure can never break your application's email** — any
 exception while logging is reported and swallowed; the email still sends.
