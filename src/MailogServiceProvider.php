@@ -4,7 +4,6 @@ namespace Jiannius\Mailog;
 
 use Illuminate\Mail\Events\MessageSending;
 use Illuminate\Mail\Events\MessageSent;
-use Illuminate\Support\Facades\Event;
 use Illuminate\Support\ServiceProvider;
 use Jiannius\Mailog\Listeners\MailLogListener;
 
@@ -25,6 +24,15 @@ class MailogServiceProvider extends ServiceProvider
 
         // Singleton so one instance holds the message-keyed maps between sending and the outcome.
         $this->app->singleton(MailLogListener::class);
+
+        // Capture every outgoing email (logging is on by default). Registered here, not in
+        // boot(), so we run ahead of every listener a host registers during boot, in
+        // EventServiceProvider or by discovery: MessageSending is dispatched with until(),
+        // which stops at the first non-null return and would otherwise skip us. The row
+        // itself is inserted by MailLogTransport just before the send, so a mail a host
+        // listener cancels never gets one.
+        $this->app['events']->listen(MessageSending::class, [MailLogListener::class, 'sending']);
+        $this->app['events']->listen(MessageSent::class, [MailLogListener::class, 'sent']);
     }
 
     /**
@@ -37,17 +45,6 @@ class MailogServiceProvider extends ServiceProvider
     {
         // Migrations — host apps pick them up with `php artisan migrate`.
         $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
-
-        // Capture every outgoing email (logging is on by default). The row itself is
-        // inserted by MailLogTransport just before the send, so a mail a host listener
-        // cancels (MessageSending is dispatched with until()) never gets one.
-        Event::listen(MessageSending::class, [MailLogListener::class, 'sending']);
-        Event::listen(MessageSent::class, [MailLogListener::class, 'sent']);
-
-        // Wrap the configured mailers' transports now (sending() re-wraps lazily, e.g. after a purge).
-        if (config('mailog.enabled', true)) {
-            $this->app->make(MailLogListener::class)->wrapConfiguredMailers();
-        }
 
         if ($this->app->runningInConsole()) {
             $this->publishes([

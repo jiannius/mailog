@@ -54,9 +54,10 @@ never reaches the transport, so it gets no row. If the transport throws, the row
 sending, it becomes `cancelled`. A row left `pending` means the send never completed (e.g. the
 worker died mid-send).
 
-Mailog wraps each configured mailer's transport to do this, so `Mail::getSymfonyTransport()` is the
-raw transport only until the first logged send (or app boot), and a Mailog decorator afterwards;
-unknown methods are forwarded to the real transport.
+Mailog wraps a mailer's transport the first time it logs a send from that mailer, so
+`Mail::getSymfonyTransport()` is the raw transport until the first logged send and a Mailog
+decorator afterwards; unknown methods are forwarded to the real transport. Mailers are resolved
+lazily, so config changed after boot is honoured.
 
 Known caveats:
 
@@ -66,10 +67,14 @@ Known caveats:
 - **Mailers that aren't Laravel's cached instance** (a `Mail::build()` with a configured mailer
   name, a mailer instance held across `Mail::purge()`) are logged when the message is sent, but
   only if their transport doesn't clone the message; with a cloning transport they get no row.
-- **Earlier listeners.** If a listener registered before Mailog's returns a non-null value from
-  `MessageSending`, Laravel skips Mailog's listener. The row is still created (from the message
-  alone, so `mailable` is empty), and `except.mailers` / `enabled` / the skip header still apply,
-  but `except.mailables` can't. On-demand mailers get no row in that case.
+- **Earlier listeners.** Mailog registers its `MessageSending` listener in its service provider's
+  `register()`, ahead of listeners registered during boot, but Laravel stops at the first listener
+  that returns a non-null value. If a listener registered in another provider's `register()` before
+  Mailog's does that, Mailog's listener is skipped. A mailer already wrapped by an earlier send still
+  gets its row, built from the message alone: `mailable` is empty, `except.mailables` can't apply, and
+  data resolvers receive an event carrying only `message` and `mailer` (no `__laravel_*` keys). A
+  mailer not yet wrapped (its first send), and on-demand mailers, get no row, and the skip header is
+  not stripped.
 
 ## Querying logs
 
@@ -173,7 +178,7 @@ The returned array is filled onto the log, so the value lands in your real, inde
 
 Mailog subscribes to Laravel's `MessageSending` and `MessageSent` events. On sending it applies the
 opt-outs, extracts every field from the Symfony `Email`, and keeps them aside; it also wraps the
-mailer's transport in a decorator (at boot, and again lazily if needed). The decorator inserts the
+mailer's transport in a decorator the first time it logs a send. The decorator inserts the
 `pending` row just before the real send, so a cancelled mail leaves nothing behind, then flips it to
 `sent` with the transport's message id, or to `failed` / `cancelled` when the send throws or is
 rejected. The `MessageSent` handler is the fallback for mailers the decorator can't cover. The

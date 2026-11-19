@@ -8,10 +8,12 @@ use Illuminate\Mail\Mailables\Content;
 use Illuminate\Mail\Mailables\Envelope as MailableEnvelope;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Exceptions;
 use Illuminate\Support\Facades\Mail;
 use Jiannius\Mailog\Enums\Status;
 use Jiannius\Mailog\Listeners\MailLogListener;
 use Jiannius\Mailog\Mailog;
+use Jiannius\Mailog\MailogServiceProvider;
 use Jiannius\Mailog\Models\MailLog;
 use Jiannius\Mailog\Transport\MailLogTransport;
 use Symfony\Component\Mailer\Envelope;
@@ -139,24 +141,48 @@ it('creates no row when a listener registered at runtime cancels the send', func
     expect(MailLog::count())->toBe(0);
 });
 
-it('still logs a mail whose sending chain an earlier non-null listener stopped', function () {
-    // HostEarlyServiceProvider's listener runs before the package's and returns a non-null value, so
-    // until() never reaches the package's listener; the transport logs the mail from the message alone.
+it('still logs a mail an earlier non-null listener stopped once the mailer was wrapped by an earlier send', function () {
+    // HostEarlyServiceProvider registers in register(), ahead of the package, and returns a non-null value
+    // so until() never reaches the package's listener; the wrapped transport logs from the message alone.
+    sendPlain('Warm up');
     config()->set('mailog_test.early', true);
 
     Mail::to('t@example.com')->send(new FailureTestMailable);
 
-    expect(Mail::getSymfonyTransport()->messages())->toHaveCount(1);
+    expect(Mail::getSymfonyTransport()->messages())->toHaveCount(2);
 
-    $log = MailLog::sole();
+    $log = MailLog::where('subject', 'From Failure Mailable')->sole();
     expect($log->status)->toBe(Status::SENT);
     expect($log->mailer)->toBe('array');
-    expect($log->subject)->toBe('From Failure Mailable');
     expect($log->mailable)->toBeNull();
     expect($log->message_id)->not->toBeNull();
 });
 
+it('runs ahead of a non-null listener a provider registers in boot()', function () {
+    // HostEarlyServiceProvider boots before the package's provider; because the package registers its
+    // listener in register(), it is still first in the chain and sees the Mailable.
+    config()->set('mailog_test.boot_early', true);
+
+    Mail::to('t@example.com')->send(new FailureTestMailable);
+
+    $log = MailLog::sole();
+    expect($log->status)->toBe(Status::SENT);
+    expect($log->mailable)->toBe(FailureTestMailable::class);
+});
+
+it('known limitation: an earlier non-null listener leaves a never-wrapped mailer without a row', function () {
+    config()->set('mailog_test.early', true);
+
+    Mail::html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('Unwrapped'));
+
+    // sending() never ran, so nothing wrapped the transport: the mail goes out raw and unlogged.
+    expect(Mail::getSymfonyTransport())->not->toBeInstanceOf(MailLogTransport::class);
+    expect(Mail::getSymfonyTransport()->messages())->toHaveCount(1);
+    expect(MailLog::count())->toBe(0);
+});
+
 it('honours the skip header when an earlier listener stopped the sending chain', function () {
+    sendPlain('Warm up');
     config()->set('mailog_test.early', true);
 
     Mail::html('<p>x</p>', function ($message) {
@@ -165,23 +191,113 @@ it('honours the skip header when an earlier listener stopped the sending chain',
     });
 
     $sent = Mail::getSymfonyTransport()->messages();
-    expect($sent)->toHaveCount(1);
+    expect($sent)->toHaveCount(2);
+    expect($sent[1]->getOriginalMessage()->getHeaders()->has(Mailog::SKIP_HEADER))->toBeFalse();
+    expect(MailLog::pluck('subject')->all())->toBe(['Warm up']);
+});
+
+it('never sends the skip header when an earlier listener stopped the chain for an excluded mailer', function () {
+    sendPlain('Warm up');
+    config()->set('mailog_test.early', true);
+    config()->set('mailog.except.mailers', ['array']);
+
+    Mail::html('<p>x</p>', function ($message) {
+        $message->from('s@example.com')->to('t@example.com')->subject('Excluded');
+        $message->getSymfonyMessage()->getHeaders()->addTextHeader(Mailog::SKIP_HEADER, '1');
+    });
+
+    $sent = Mail::getSymfonyTransport()->messages();
+    expect($sent[1]->getOriginalMessage()->getHeaders()->has(Mailog::SKIP_HEADER))->toBeFalse();
+    expect(MailLog::count())->toBe(1);
+});
+
+it('never sends the skip header when logging is disabled', function () {
+    config()->set('mailog.enabled', false);
+
+    Mail::html('<p>x</p>', function ($message) {
+        $message->from('s@example.com')->to('t@example.com')->subject('Off');
+        $message->getSymfonyMessage()->getHeaders()->addTextHeader(Mailog::SKIP_HEADER, '1');
+    });
+
+    $sent = Mail::getSymfonyTransport()->messages();
     expect($sent[0]->getOriginalMessage()->getHeaders()->has(Mailog::SKIP_HEADER))->toBeFalse();
     expect(MailLog::count())->toBe(0);
 });
 
 it('honours the opt-outs when an earlier listener stopped the sending chain', function () {
+    sendPlain('Warm up');
     config()->set('mailog_test.early', true);
 
     config()->set('mailog.enabled', false);
-    Mail::html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('Off'));
+    sendPlain('Off');
 
     config()->set('mailog.enabled', true);
     config()->set('mailog.except.mailers', ['array']);
-    Mail::html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('Excluded'));
+    sendPlain('Excluded');
 
-    expect(Mail::getSymfonyTransport()->messages())->toHaveCount(2);
-    expect(MailLog::count())->toBe(0);
+    expect(Mail::getSymfonyTransport()->messages())->toHaveCount(3);
+    expect(MailLog::pluck('subject')->all())->toBe(['Warm up']);
+});
+
+it('gives data resolvers a synthetic event with the message and mailer when logging from the message alone', function () {
+    sendPlain('Warm up');
+    config()->set('mailog_test.early', true);
+
+    $seen = [];
+    Mailog::resolveDataUsing(function ($event) use (&$seen) {
+        $seen[] = $event->data;
+
+        return [];
+    });
+
+    sendPlain('Resolved');
+    Mailog::resolveDataUsing(null);
+
+    expect($seen)->toHaveCount(1);
+    expect($seen[0])->toHaveKeys(['message', 'mailer'])->not->toHaveKey('__laravel_mailable');
+    expect($seen[0]['mailer'])->toBe('array');
+});
+
+it('uses mailer config changed after boot because mailers are resolved lazily', function () {
+    Mail::extend('late', fn () => new KeepTransport);
+    config()->set('mail.mailers.array', ['transport' => 'late']);
+
+    sendPlain('Late config');
+
+    $transport = Mail::mailer('array')->getSymfonyTransport();
+    expect($transport)->toBeInstanceOf(MailLogTransport::class);
+    expect((fn () => $this->inner)->call($transport))->toBeInstanceOf(KeepTransport::class);
+    expect(MailLog::sole()->status)->toBe(Status::SENT);
+});
+
+it('does not resolve mailers or report errors at boot', function () {
+    // A stock mailer whose driver cannot be built, like ses/postmark/resend without their packages.
+    config()->set('mail.mailers.broken', ['transport' => 'no-such-driver']);
+    Exceptions::fake();
+
+    app()->getProvider(MailogServiceProvider::class)->boot();
+
+    Exceptions::assertNothingReported();
+    expect((fn () => $this->mailers)->call(app('mail.manager')))->toBe([]);
+});
+
+it('inserts exactly one row when the sending fallback already inserted and a wrapped transport runs', function () {
+    // An on-demand mailer is not configured, so sending() inserts the row itself; its transport is wrapped by hand.
+    $mailer = Mail::build(['transport' => 'array']);
+    $mailer->setSymfonyTransport(new MailLogTransport($mailer->getSymfonyTransport(), 'ondemand'));
+
+    $mailer->html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('Once'));
+
+    expect(MailLog::sole()->status)->toBe(Status::SENT);
+});
+
+it('inserts exactly one row through a doubly wrapped transport', function () {
+    $mailer = Mail::mailer('array');
+    $mailer->setSymfonyTransport(new MailLogTransport(new MailLogTransport(new KeepTransport), 'array'));
+
+    $mailer->html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('Twice'));
+
+    expect(MailLog::sole()->status)->toBe(Status::SENT);
 });
 
 it('wraps the mailer transport exactly once across several sends', function () {
@@ -317,6 +433,14 @@ it('creates no row for an opted-out message even on a wrapped mailer', function 
     expect(MailLog::count())->toBe(0);
     expect(Mail::getSymfonyTransport()->messages())->toHaveCount(1);
 });
+
+/**
+ * Send a plain HTML mail through the default mailer.
+ */
+function sendPlain(string $subject): void
+{
+    Mail::html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject($subject));
+}
 
 /**
  * Register a mailer named "cloning" whose NullTransport clones the message, like a real transport.

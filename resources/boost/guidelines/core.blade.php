@@ -14,12 +14,19 @@ flipped to `SENT` once the transport accepts it. If the transport throws at send
 flipped to `FAILED` with the error stored in the `error` column (and `failed_at`); the original
 exception is rethrown, so your send fails exactly as it would without the package. If the transport
 rejects the message before sending (returns nothing), the row is flipped to `CANCELLED`. A row left
-`PENDING` means the send never completed (e.g. the process died mid-send). Mailog wraps each
-configured mailer's transport, so `Mail::getSymfonyTransport()` is a Mailog decorator once the app
-has booted (it forwards unknown methods to the real transport). On-demand mailers
-(`Mail::mailer([...])`, `Mail::build()`) are not wrapped: a failure, rejection, cancel or cloning
-transport leaves their row `PENDING`. When an earlier `MessageSending` listener returns a non-null
-value, the `mailable` column is empty for that mail.
+`PENDING` means the send never completed (e.g. the process died mid-send). Mailog wraps a mailer's
+transport the first time it logs a send, so `Mail::getSymfonyTransport()` is the raw transport until
+then and a Mailog decorator after (it forwards unknown methods to the real transport).
+
+Caveats:
+- On-demand mailers (`Mail::mailer([...])`, `Mail::build()`) are not wrapped: a cancel, failure,
+  rejection or cloning transport leaves their row `PENDING`.
+- A `Mail::build()` mailer with a configured name, or a mailer held across `Mail::purge()`, gets a
+  row only if its transport doesn't clone the message.
+- If a `MessageSending` listener registered in another provider's `register()` before Mailog's
+  returns a non-null value, Mailog's listener is skipped: an already-wrapped mailer still gets a row
+  with no `mailable` (`except.mailables` can't apply; data resolvers see an event with only
+  `message` and `mailer`), while a not-yet-wrapped mailer or an on-demand mailer gets none.
 
 @verbatim
 <code-snippet name="Querying logs" lang="php">

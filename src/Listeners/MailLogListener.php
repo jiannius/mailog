@@ -65,15 +65,20 @@ class MailLogListener
     public function sending(MessageSending $event): void
     {
         try {
+            $message = $event->message;
+            $headers = $message->getHeaders();
+            $skip = $headers->has(Mailog::SKIP_HEADER);
+
+            // Never let the skip header reach the transport, whether or not we log.
+            if ($skip) {
+                $headers->remove(Mailog::SKIP_HEADER);
+            }
+
             if (! config('mailog.enabled', true)) {
                 return;
             }
 
-            $message = $event->message;
-            $headers = $message->getHeaders();
-
-            if ($headers->has(Mailog::SKIP_HEADER)) {
-                $headers->remove(Mailog::SKIP_HEADER);
+            if ($skip) {
                 $this->skipped[$message] = true;
 
                 return;
@@ -137,7 +142,18 @@ class MailLogListener
                 return;
             }
 
-            if (! $message instanceof Email || ! config('mailog.enabled', true)) {
+            if (! $message instanceof Email) {
+                return;
+            }
+
+            // Strip first: the header must never be sent, whichever opt-out applies.
+            $skip = $message->getHeaders()->has(Mailog::SKIP_HEADER);
+
+            if ($skip) {
+                $message->getHeaders()->remove(Mailog::SKIP_HEADER);
+            }
+
+            if (! config('mailog.enabled', true) || $skip) {
                 return;
             }
 
@@ -145,13 +161,9 @@ class MailLogListener
                 return;
             }
 
-            if ($message->getHeaders()->has(Mailog::SKIP_HEADER)) {
-                $message->getHeaders()->remove(Mailog::SKIP_HEADER);
+            $event = new MessageSending($message, ['message' => $message, 'mailer' => $mailer]);
 
-                return;
-            }
-
-            $this->insert($message, $this->attributes(new MessageSending($message, ['mailer' => $mailer]), $mailer, null));
+            $this->insert($message, $this->attributes($event, $mailer, null));
         } catch (\Throwable $e) {
             // Logging must never break the host's email send — report and move on.
             report($e);
@@ -201,19 +213,6 @@ class MailLogListener
         $log->save();
 
         $this->pending[$message] = $log->getKey();
-    }
-
-    /**
-     * Wrap every configured mailer's transport up front. sending() also wraps
-     * lazily, but it never runs when an earlier MessageSending listener stops
-     * the chain, so without this such a mail would go out through a raw
-     * transport and get no row. Never throws.
-     */
-    public function wrapConfiguredMailers(): void
-    {
-        foreach (array_keys(config('mail.mailers', [])) as $name) {
-            $this->wrap($name);
-        }
     }
 
     /**
