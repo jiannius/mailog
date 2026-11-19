@@ -23,7 +23,7 @@ class MailogServiceProvider extends ServiceProvider
         $this->app->singleton(Mailog::class, fn (): Mailog => new Mailog);
         $this->app->alias(Mailog::class, 'mailog');
 
-        // Singleton so one instance bridges MessageSending → MessageSent via its map.
+        // Singleton so one instance holds the message → log map between sending and the outcome.
         $this->app->singleton(MailLogListener::class);
     }
 
@@ -38,8 +38,11 @@ class MailogServiceProvider extends ServiceProvider
         // Migrations — host apps pick them up with `php artisan migrate`.
         $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
 
-        // Capture every outgoing email (logging is on by default).
-        Event::listen(MessageSending::class, [MailLogListener::class, 'sending']);
+        // Capture every outgoing email (logging is on by default). MessageSending is
+        // dispatched with until(), so a listener returning false cancels the send; ours
+        // is registered once the app has booted, i.e. after every listener the host
+        // registers during boot, so a cancelled mail never leaves a PENDING row.
+        $this->app->booted(fn () => Event::listen(MessageSending::class, [MailLogListener::class, 'sending']));
         Event::listen(MessageSent::class, [MailLogListener::class, 'sent']);
 
         if ($this->app->runningInConsole()) {

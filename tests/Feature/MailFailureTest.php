@@ -34,13 +34,13 @@ it('stays transparent so the inner transport remains usable', function () {
 });
 
 it('marks the log failed and records the error when the transport throws', function () {
-    // A mailer whose transport always throws, wrapped exactly the way boot() wraps real mailers.
+    // A mailer whose transport always throws, wrapped the way sending() lazily wraps real mailers.
     Mail::extend('throwing', fn () => new ThrowingTransport);
     config()->set('mail.mailers.throwing', ['transport' => 'throwing']);
 
     $mailer = Mail::mailer('throwing');
     $mailer->setSymfonyTransport(
-        new MailLogTransport($mailer->getSymfonyTransport(), app(MailLogListener::class))
+        new MailLogTransport($mailer->getSymfonyTransport())
     );
 
     $send = fn () => $mailer->html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('Fail'));
@@ -60,7 +60,7 @@ it('marks the log sent when the real transport clones the message', function () 
     // Real Symfony transports (SMTP, Mailgun, SES) clone the message in AbstractTransport::send(),
     // so MessageSent carries a different object than MessageSending saw. NullTransport clones too.
     $mailer = Mail::mailer('array');
-    $mailer->setSymfonyTransport($transport = new MailLogTransport(new NullTransport, app(MailLogListener::class)));
+    $mailer->setSymfonyTransport($transport = new MailLogTransport(new NullTransport));
 
     $sentMessages = [];
     Event::listen(MessageSent::class, function (MessageSent $event) use (&$sentMessages) {
@@ -84,7 +84,7 @@ it('writes the sent status once when the transport does not clone the message', 
     // With a non-cloning transport MessageSent carries the very object the pending log is keyed by,
     // so the sent() fallback would write a second time unless delivered() cleared the entry first.
     $mailer = Mail::mailer('array');
-    $mailer->setSymfonyTransport(new MailLogTransport(new KeepTransport, app(MailLogListener::class)));
+    $mailer->setSymfonyTransport(new MailLogTransport(new KeepTransport));
 
     $updates = 0;
     DB::listen(function ($query) use (&$updates) {
@@ -102,7 +102,7 @@ it('writes the sent status once when the transport does not clone the message', 
 it('marks the log cancelled when the transport rejects the message', function () {
     // Symfony's AbstractTransport::send() returns null when a MessageEvent listener rejects the message.
     $mailer = Mail::mailer('array');
-    $mailer->setSymfonyTransport(new MailLogTransport(new RejectingTransport, app(MailLogListener::class)));
+    $mailer->setSymfonyTransport(new MailLogTransport(new RejectingTransport));
 
     $mailer->html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('Rejected'));
 
@@ -114,14 +114,66 @@ it('marks the log cancelled when the transport rejects the message', function ()
     expect($log->message_id)->toBeNull();
 });
 
-it('creates no row when a MessageSending listener cancels the send', function () {
-    // Registered after the package's own listener, exactly like a host app's listener.
-    Event::listen(MessageSending::class, fn () => false);
+it('creates no row when a host listener registered during boot cancels the send', function () {
+    // HostCancelServiceProvider registers its listener in boot(), like a real app's provider does.
+    config()->set('mailog_test.cancel', true);
 
     Mail::html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('Blocked'));
 
     expect(MailLog::count())->toBe(0);
     expect(Mail::getSymfonyTransport()->messages())->toHaveCount(0);
+});
+
+it('known limitation: a listener registered after boot cancels the send but leaves the row pending', function () {
+    // Registered at runtime, so it runs after the package's listener, which has already inserted the row.
+    Event::listen(MessageSending::class, fn () => false);
+
+    Mail::html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('Late'));
+
+    expect(Mail::getSymfonyTransport()->messages())->toHaveCount(0);
+    expect(MailLog::sole()->status)->toBe(Status::PENDING);
+});
+
+it('wraps the mailer transport exactly once across several sends', function () {
+    foreach (range(1, 3) as $i) {
+        Mail::html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject("Send {$i}"));
+    }
+
+    $transport = Mail::getSymfonyTransport();
+
+    expect($transport)->toBeInstanceOf(MailLogTransport::class);
+    expect($transport->messages())->toHaveCount(3);
+    expect((fn () => $this->inner)->call($transport))->not->toBeInstanceOf(MailLogTransport::class);
+    expect(MailLog::where('status', Status::SENT->value)->count())->toBe(3);
+});
+
+it('logs a mailer built on demand under a configured name', function () {
+    $mailer = Mail::build(['name' => 'array', 'transport' => 'array']);
+
+    $mailer->html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('Built'));
+
+    expect(MailLog::sole()->status)->toBe(Status::SENT);
+});
+
+it('logs a send through a mailer held across a purge', function () {
+    $held = Mail::mailer('array');
+
+    Mail::purge('array');
+
+    $held->html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject('Held'));
+
+    expect(MailLog::sole()->status)->toBe(Status::SENT);
+});
+
+it('keeps logging after the listener singleton is flushed while the wrapped transport survives', function () {
+    $send = fn (string $subject) => Mail::html('<p>x</p>', fn ($m) => $m->from('s@example.com')->to('t@example.com')->subject($subject));
+
+    $send('Before');
+    app()->forgetInstance(MailLogListener::class);
+    $send('After');
+
+    expect(MailLog::count())->toBe(2);
+    expect(MailLog::where('status', Status::SENT->value)->count())->toBe(2);
 });
 
 it('still logs and reaches sent after the mailers are purged', function () {

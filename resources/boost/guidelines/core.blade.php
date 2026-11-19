@@ -8,12 +8,16 @@ tracking. Its service provider auto-registers and listens to Laravel's mail even
 
 Each send creates a `Jiannius\Mailog\Models\MailLog` row: sender, recipients (to/cc/bcc/reply-to),
 subject, both HTML and text bodies, attachment metadata (filename/mime/size), tags, metadata,
-the mailer + Mailable class, the resolved user, and the outcome. A row is created `PENDING` just
-before the transport sends (a mail cancelled by a `MessageSending` listener gets no row) and flipped to `SENT` once the transport accepts it. If the transport throws at send time,
+the mailer + Mailable class, the resolved user, and the outcome. A row is created `PENDING`
+on send and flipped to `SENT` once the transport accepts it. If the transport throws at send time,
 the row is flipped to `FAILED` with the error stored in the `error` column (and `failed_at`); the
 original exception is rethrown, so your send fails exactly as it would without the package. If the
 transport rejects the message before sending (returns nothing), the row is flipped to `CANCELLED`. A row
-left `PENDING` means the send never completed (e.g. the process died mid-send).
+left `PENDING` means the send never completed (e.g. the process died mid-send). Two caveats also
+leave a row `PENDING` although nothing was sent: a `MessageSending` listener you register at runtime
+after boot that returns `false` (listeners registered during boot run before Mailog's, so a cancelled
+mail gets no row), and on-demand mailers (`Mail::mailer([...])`, `Mail::build()`), which are not
+wrapped, so a failure, rejection or cloning transport is not recorded for them.
 
 @verbatim
 <code-snippet name="Querying logs" lang="php">
