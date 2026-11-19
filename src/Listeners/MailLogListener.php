@@ -9,6 +9,7 @@ use Jiannius\Mailog\Mailog;
 use Jiannius\Mailog\Models\MailLog;
 use Symfony\Component\Mailer\Header\MetadataHeader;
 use Symfony\Component\Mailer\Header\TagHeader;
+use Symfony\Component\Mailer\SentMessage;
 use Symfony\Component\Mime\Address;
 use Symfony\Component\Mime\Email;
 use Symfony\Component\Mime\Part\DataPart;
@@ -96,6 +97,9 @@ class MailLogListener
 
     /**
      * Flip the pending log to sent once the transport accepts it.
+     *
+     * Fallback for mailers not wrapped by MailLogTransport; a no-op when
+     * delivered() already handled the message.
      */
     public function sent(MessageSent $event): void
     {
@@ -113,6 +117,35 @@ class MailLogListener
             MailLog::query()->whereKey($id)->update([
                 'status' => Status::SENT->value,
                 'message_id' => $event->sent->getMessageId(),
+                'sent_at' => now(),
+            ]);
+        } catch (\Throwable $e) {
+            // Logging must never break the host's email send — report and move on.
+            report($e);
+        }
+    }
+
+    /**
+     * Flip the pending log to sent after the transport accepts the message.
+     *
+     * Called by MailLogTransport with the same message object MessageSending
+     * saw, since real transports clone it before MessageSent fires. A no-op
+     * when the message has no pending log.
+     */
+    public function delivered(object $message, ?SentMessage $sent): void
+    {
+        try {
+            if (! isset($this->pending[$message])) {
+                return;
+            }
+
+            $id = $this->pending[$message];
+
+            unset($this->pending[$message]);
+
+            MailLog::query()->whereKey($id)->update([
+                'status' => Status::SENT->value,
+                'message_id' => $sent?->getMessageId(),
                 'sent_at' => now(),
             ]);
         } catch (\Throwable $e) {
