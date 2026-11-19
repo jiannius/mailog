@@ -182,9 +182,8 @@ mailer's transport in a decorator the first time it logs a send. The decorator i
 `pending` row just before the real send, so a cancelled mail leaves nothing behind, then flips it to
 `sent` with the transport's message id, or to `failed` / `cancelled` when the send throws or is
 rejected. The `MessageSent` handler is the fallback for mailers the decorator can't cover. The
-message is
-correlated by the message object itself (via a `WeakMap`), so logging is reliable even in
-long-running workers (Octane, `queue:work`).
+message is correlated by the message object itself (via a `WeakMap`), so logging is reliable even
+in long-running workers (Octane, `queue:work`).
 
 Capture is wrapped so that **a logging failure can never break your application's email** — any
 exception while logging is reported and swallowed; the email still sends.

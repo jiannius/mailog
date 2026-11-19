@@ -328,7 +328,7 @@ it('logs a non-cloning mailer built on demand under a configured name via the se
 });
 
 it('logs a non-cloning send through a mailer held across a purge via the sent fallback', function () {
-    // Purge first so the held Mailer is a fresh, unwrapped instance (boot wrapped the original).
+    // Purge first so the held Mailer is a fresh, unwrapped instance.
     Mail::purge('array');
     $held = Mail::mailer('array');
 
