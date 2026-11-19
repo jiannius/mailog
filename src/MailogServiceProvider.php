@@ -4,11 +4,8 @@ namespace Jiannius\Mailog;
 
 use Illuminate\Mail\Events\MessageSending;
 use Illuminate\Mail\Events\MessageSent;
-use Illuminate\Support\Facades\Event;
-use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\ServiceProvider;
 use Jiannius\Mailog\Listeners\MailLogListener;
-use Jiannius\Mailog\Transport\MailLogTransport;
 
 class MailogServiceProvider extends ServiceProvider
 {
@@ -25,8 +22,17 @@ class MailogServiceProvider extends ServiceProvider
         $this->app->singleton(Mailog::class, fn (): Mailog => new Mailog);
         $this->app->alias(Mailog::class, 'mailog');
 
-        // Singleton so one instance bridges MessageSending → MessageSent via its map.
+        // Singleton so one instance holds the message-keyed maps between sending and the outcome.
         $this->app->singleton(MailLogListener::class);
+
+        // Capture every outgoing email (logging is on by default). Registered here, not in
+        // boot(), so we run ahead of every listener a host registers during boot, in
+        // EventServiceProvider or by discovery: MessageSending is dispatched with until(),
+        // which stops at the first non-null return and would otherwise skip us. The row
+        // itself is inserted by MailLogTransport just before the send, so a mail a host
+        // listener cancels never gets one.
+        $this->app['events']->listen(MessageSending::class, [MailLogListener::class, 'sending']);
+        $this->app['events']->listen(MessageSent::class, [MailLogListener::class, 'sent']);
     }
 
     /**
@@ -40,13 +46,6 @@ class MailogServiceProvider extends ServiceProvider
         // Migrations — host apps pick them up with `php artisan migrate`.
         $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
 
-        // Capture every outgoing email (logging is on by default).
-        Event::listen(MessageSending::class, [MailLogListener::class, 'sending']);
-        Event::listen(MessageSent::class, [MailLogListener::class, 'sent']);
-
-        // Capture send-time transport failures (Laravel fires no event for them).
-        $this->captureSendFailures();
-
         if ($this->app->runningInConsole()) {
             $this->publishes([
                 __DIR__.'/../config/mailog.php' => config_path('mailog.php'),
@@ -55,33 +54,6 @@ class MailogServiceProvider extends ServiceProvider
             $this->publishes([
                 __DIR__.'/../database/migrations' => database_path('migrations'),
             ], 'mailog-migrations');
-        }
-    }
-
-    /**
-     * Wrap each configured mailer's transport so a synchronous send failure
-     * flips its pending log to FAILED. Each mailer is wrapped in isolation so a
-     * single misconfigured mailer can never break the host's boot. On-demand
-     * mailers (Mail::mailer([...])) are not covered.
-     */
-    protected function captureSendFailures(): void
-    {
-        if (! config('mailog.enabled', true)) {
-            return;
-        }
-
-        $listener = $this->app->make(MailLogListener::class);
-
-        foreach (array_keys(config('mail.mailers', [])) as $name) {
-            try {
-                $mailer = Mail::mailer($name);
-
-                $mailer->setSymfonyTransport(
-                    new MailLogTransport($mailer->getSymfonyTransport(), $listener)
-                );
-            } catch (\Throwable $e) {
-                report($e);
-            }
         }
     }
 }

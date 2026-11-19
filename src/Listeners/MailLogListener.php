@@ -7,6 +7,7 @@ use Illuminate\Mail\Events\MessageSent;
 use Jiannius\Mailog\Enums\Status;
 use Jiannius\Mailog\Mailog;
 use Jiannius\Mailog\Models\MailLog;
+use Jiannius\Mailog\Transport\MailLogTransport;
 use Symfony\Component\Mailer\Header\MetadataHeader;
 use Symfony\Component\Mailer\Header\TagHeader;
 use Symfony\Component\Mailer\SentMessage;
@@ -17,38 +18,68 @@ use Symfony\Component\Mime\Part\DataPart;
 class MailLogListener
 {
     /**
-     * Maps each outgoing message object to its MailLog id, bridging sending →
-     * sent. A WeakMap so entries vanish when the message is garbage-collected:
-     * no leak (and no spl_object_id reuse hazard) in long-running workers when
-     * a send fails before MessageSent fires.
+     * Maps each outgoing message object to the attributes of a log built on
+     * sending but not yet inserted. MailLogTransport inserts the row just
+     * before the transport sends, so a send cancelled in between (a
+     * MessageSending listener returning false) never gets one. A WeakMap so
+     * entries vanish when the message is garbage-collected: no leak (and no
+     * spl_object_id reuse hazard) in long-running workers.
+     *
+     * @var \WeakMap<object, array<string, mixed>>
+     */
+    protected \WeakMap $stashed;
+
+    /**
+     * Messages that were opted out on sending (skip header, except lists), so
+     * the transport must not log them from the message alone.
+     *
+     * @var \WeakMap<object, true>
+     */
+    protected \WeakMap $skipped;
+
+    /**
+     * Maps each outgoing message object to the id of its PENDING MailLog,
+     * bridging the insert → the send outcome. Same WeakMap rationale as
+     * $stashed.
      *
      * @var \WeakMap<object, string>
      */
     protected \WeakMap $pending;
 
     /**
-     * Initialise the message → log id map.
+     * Initialise the message-keyed maps.
      */
     public function __construct()
     {
+        $this->stashed = new \WeakMap;
+        $this->skipped = new \WeakMap;
         $this->pending = new \WeakMap;
     }
 
     /**
-     * Create a pending log for an outgoing message.
+     * Build the log for an outgoing message and make sure the named mailer's
+     * transport is wrapped. With a wrapped mailer the attributes are stashed
+     * for MailLogTransport to insert just before the send; otherwise (on-demand
+     * or unresolvable mailers) the PENDING row is inserted now.
      */
     public function sending(MessageSending $event): void
     {
         try {
+            $message = $event->message;
+            $headers = $message->getHeaders();
+            $skip = $headers->has(Mailog::SKIP_HEADER);
+
+            // Never let the skip header reach the transport, whether or not we log.
+            if ($skip) {
+                $headers->remove(Mailog::SKIP_HEADER);
+            }
+
             if (! config('mailog.enabled', true)) {
                 return;
             }
 
-            $message = $event->message;
-            $headers = $message->getHeaders();
-
-            if ($headers->has(Mailog::SKIP_HEADER)) {
-                $headers->remove(Mailog::SKIP_HEADER);
+            if ($skip) {
+                $this->skipped[$message] = true;
 
                 return;
             }
@@ -57,38 +88,26 @@ class MailLogListener
             $mailable = $event->data['__laravel_mailable'] ?? null;
 
             if ($mailer !== null && in_array($mailer, config('mailog.except.mailers', []), true)) {
+                $this->skipped[$message] = true;
+
                 return;
             }
 
             if ($mailable !== null && in_array($mailable, config('mailog.except.mailables', []), true)) {
+                $this->skipped[$message] = true;
+
                 return;
             }
 
-            $mailog = app(Mailog::class);
+            $attributes = $this->attributes($event, $mailer, $mailable);
 
-            $log = new MailLog([
-                'status' => Status::PENDING,
-                'mailer' => $mailer,
-                'mailable' => $mailable,
-                'from' => $this->addresses($message->getFrom()),
-                'to' => $this->addresses($message->getTo()),
-                'cc' => $this->addresses($message->getCc()),
-                'bcc' => $this->addresses($message->getBcc()),
-                'reply_to' => $this->addresses($message->getReplyTo()),
-                'subject' => $message->getSubject(),
-                'html_body' => $this->body($message->getHtmlBody()),
-                'text_body' => $this->body($message->getTextBody()),
-                'attachments' => $this->attachments($message),
-                'tags' => $this->tags($message),
-                'metadata' => $this->metadata($message),
-            ]);
+            if ($this->wrap($mailer)) {
+                $this->stashed[$message] = $attributes;
 
-            $log->fill($mailog->resolveUser($event));
-            $log->fill($mailog->resolveData($event));
+                return;
+            }
 
-            $log->save();
-
-            $this->pending[$message] = $log->getKey();
+            $this->insert($message, $attributes);
         } catch (\Throwable $e) {
             // Logging must never break the host's email send — report and move on.
             report($e);
@@ -96,15 +115,163 @@ class MailLogListener
     }
 
     /**
+     * Record the attempt just before the transport sends: insert the PENDING
+     * log from the attributes stashed on sending.
+     *
+     * Called by MailLogTransport with the same message object MessageSending
+     * saw. A no-op for opted-out messages and for messages already inserted.
+     * When nothing is known about the message, an earlier MessageSending
+     * listener returned a non-null value and stopped the chain before ours
+     * ran; the log is then built from the message alone (no mailable) with the
+     * opt-outs re-applied here.
+     */
+    public function attempting(object $message, ?string $mailer = null): void
+    {
+        try {
+            if (isset($this->skipped[$message]) || isset($this->pending[$message])) {
+                return;
+            }
+
+            if (isset($this->stashed[$message])) {
+                $attributes = $this->stashed[$message];
+
+                unset($this->stashed[$message]);
+
+                $this->insert($message, $attributes);
+
+                return;
+            }
+
+            if (! $message instanceof Email) {
+                return;
+            }
+
+            // Strip first: the header must never be sent, whichever opt-out applies.
+            $skip = $message->getHeaders()->has(Mailog::SKIP_HEADER);
+
+            if ($skip) {
+                $message->getHeaders()->remove(Mailog::SKIP_HEADER);
+            }
+
+            if (! config('mailog.enabled', true) || $skip) {
+                return;
+            }
+
+            if ($mailer !== null && in_array($mailer, config('mailog.except.mailers', []), true)) {
+                return;
+            }
+
+            $event = new MessageSending($message, ['message' => $message, 'mailer' => $mailer]);
+
+            $this->insert($message, $this->attributes($event, $mailer, null));
+        } catch (\Throwable $e) {
+            // Logging must never break the host's email send — report and move on.
+            report($e);
+        }
+    }
+
+    /**
+     * Build the attributes of a PENDING log from the message, with the user and
+     * data resolvers run now: auth context belongs to this moment.
+     *
+     * @return array<string, mixed>
+     */
+    protected function attributes(MessageSending $event, ?string $mailer, ?string $mailable): array
+    {
+        $message = $event->message;
+        $mailog = app(Mailog::class);
+
+        return [
+            'status' => Status::PENDING,
+            'mailer' => $mailer,
+            'mailable' => $mailable,
+            'from' => $this->addresses($message->getFrom()),
+            'to' => $this->addresses($message->getTo()),
+            'cc' => $this->addresses($message->getCc()),
+            'bcc' => $this->addresses($message->getBcc()),
+            'reply_to' => $this->addresses($message->getReplyTo()),
+            'subject' => $message->getSubject(),
+            'html_body' => $this->body($message->getHtmlBody()),
+            'text_body' => $this->body($message->getTextBody()),
+            'attachments' => $this->attachments($message),
+            'tags' => $this->tags($message),
+            'metadata' => $this->metadata($message),
+            ...$mailog->resolveUser($event),
+            ...$mailog->resolveData($event),
+        ];
+    }
+
+    /**
+     * Insert a PENDING log and remember its id against the message.
+     *
+     * @param  array<string, mixed>  $attributes
+     */
+    protected function insert(object $message, array $attributes): void
+    {
+        $log = new MailLog($attributes);
+
+        $log->save();
+
+        $this->pending[$message] = $log->getKey();
+    }
+
+    /**
+     * Make sure the named mailer's transport is a MailLogTransport, wrapping it
+     * if not, and report whether the mailer is now wrapped. Laravel reads the
+     * mailer's transport after MessageSending, so the wrap applies to the send
+     * in flight. False for on-demand or unconfigured mailers, or if wrapping
+     * failed. Never throws.
+     */
+    protected function wrap(?string $name): bool
+    {
+        try {
+            if ($name === null || ! array_key_exists($name, config('mail.mailers', []))) {
+                return false;
+            }
+
+            $mailer = app('mail.manager')->mailer($name);
+            $transport = $mailer->getSymfonyTransport();
+
+            if (! $transport instanceof MailLogTransport) {
+                $mailer->setSymfonyTransport(new MailLogTransport($transport, $name));
+            }
+
+            return true;
+        } catch (\Throwable $e) {
+            // A mailer we can't wrap must never break the host's send — report and move on.
+            report($e);
+
+            return false;
+        }
+    }
+
+    /**
      * Flip the pending log to sent once the transport accepts it.
      *
      * Fallback for mailers not wrapped by MailLogTransport; a no-op when
-     * delivered() already handled the message.
+     * delivered() already handled the message. When only stashed attributes
+     * exist — the sending Mailer is not the manager's cached instance, so its
+     * transport never recorded the attempt — the log is inserted as SENT.
      */
     public function sent(MessageSent $event): void
     {
         try {
             $message = $event->sent->getOriginalMessage();
+
+            if (isset($this->stashed[$message])) {
+                $attributes = $this->stashed[$message];
+
+                unset($this->stashed[$message]);
+
+                (new MailLog([
+                    ...$attributes,
+                    'status' => Status::SENT,
+                    'message_id' => $event->sent->getMessageId(),
+                    'sent_at' => now(),
+                ]))->save();
+
+                return;
+            }
 
             if (! isset($this->pending[$message])) {
                 return;
