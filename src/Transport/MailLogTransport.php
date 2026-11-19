@@ -27,9 +27,10 @@ class MailLogTransport implements TransportInterface
 
     /**
      * Send via the inner transport, logging the outcome: sent on success,
-     * failed (then rethrown) if it throws. Marking sent here rather than from
-     * MessageSent is deliberate — real Symfony transports clone the message, so
-     * the event's original message is not the object the pending log is keyed by.
+     * cancelled if it returns null (message rejected), failed (then rethrown)
+     * if it throws. Marking sent here rather than from MessageSent is
+     * deliberate — real Symfony transports clone the message, so the event's
+     * original message is not the object the pending log is keyed by.
      */
     public function send(RawMessage $message, ?Envelope $envelope = null): ?SentMessage
     {

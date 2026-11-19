@@ -20,6 +20,7 @@ use Jiannius\Mailog\Models\MailLog;
 
 MailLog::sent()->latest()->get();
 MailLog::failed()->get();           // transport threw at send time; see ->error
+MailLog::cancelled()->get();        // transport rejected the message before sending
 MailLog::pending()->get();          // in-flight / never completed
 mailog()->version();                // package entry-point singleton
 </code-snippet>
